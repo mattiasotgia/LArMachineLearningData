@@ -8,6 +8,9 @@ scripts/__pycache__/
 *xml
 *pkl
 
+// Ignore numpy files (images for vertex training)
+*.npz
+
 // Ignore images
 *.pdf
 
