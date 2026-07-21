@@ -20,3 +20,8 @@ docs/
 *.ipynb_checkpoints/
 
 *.DS_Store
+
+scripts/deep_learning/vertex/TEST_DONT_SAVE.ipynb
+*/*/__pycache__
+*/*/*/__pycache__
+*/**/*/__pycache__
