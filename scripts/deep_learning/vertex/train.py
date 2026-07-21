@@ -61,7 +61,7 @@ def to_tensor(arr, device):
 def main(view, classes, path, vertex_pass, sample, 
          model_name, epochs, batch_size, validation_pct, seed, 
          cache, cache_path, cpu, shuffle_training, generate_weights):
-
+ 
     if not cpu:
         torch.set_default_device('cuda:0')
         device = torch.device('cuda:0')
@@ -69,7 +69,6 @@ def main(view, classes, path, vertex_pass, sample,
     else:
         device = torch.device('cpu')
         click.echo('Using CPU for training')
-
 
     # 1. Create the balance map
 
@@ -137,26 +136,77 @@ def main(view, classes, path, vertex_pass, sample,
                 ]))
             else:
                 click.echo(f'Info: Resuming from latest epoch n. {latest_epoch}')
+
+    n_train_batches = len(bunch.train_dl)
+    n_valid_batches = len(bunch.valid_dl)
     
     if cache:
         weights = np.load(f'{this_cache_path}/weights_{model_name}.npz', 
                           allow_pickle=True)['arr_0']
         weights = np.asarray(weights, dtype=np.float32)
+
+        # A stale/corrupt cache (e.g. from a run with a different --classes, or a run
+        # where get_class_weights returned None) produces a weight array that silently
+        # casts to nan/wrong-length here rather than raising - fail loudly now instead of
+        # 3 stack frames deep inside cross_entropy later.
+
+        if weights.ndim == 0 or weights.shape[0] != classes:
+            raise ValueError(
+                f"Cached weights at {this_cache_path}/weights_{model_name}.npz have shape "
+                f"{weights.shape}, expected ({classes},) for --classes {classes}. "
+                f"Delete/regenerate this cache file (it's likely stale from a run with a "
+                f"different --classes, or from a run where class counting failed)."
+            )
+        if not np.all(np.isfinite(weights)):
+            raise ValueError(
+                f"Cached weights at {this_cache_path}/weights_{model_name}.npz contain "
+                f"non-finite values ({weights}) - delete/regenerate this cache file."
+            )
         
         click.echo(f'Info: loaded weights (to {device}) from {this_cache_path}/weights_{model_name}.npz')
 
         cached_losses = np.load(f'{this_cache_path}/losses_{model_name}_{latest_epoch}.npz', allow_pickle=True)
-        train_losses = to_tensor(cached_losses['arr_0'], device)
-        val_losses   = to_tensor(cached_losses['arr_1'], device)
-        batch_losses = to_tensor(cached_losses['arr_2'], device)
-        train_accs   = to_tensor(cached_losses['arr_3'], device)
-        val_accs     = to_tensor(cached_losses['arr_4'], device)
-        batch_accs   = to_tensor(cached_losses['arr_5'], device)
+        old_train_losses = to_tensor(cached_losses['arr_0'], device)
+        old_val_losses   = to_tensor(cached_losses['arr_1'], device)
+        old_train_accs   = to_tensor(cached_losses['arr_3'], device)
+        old_val_accs     = to_tensor(cached_losses['arr_4'], device)
+
+        train_losses = torch.zeros(epochs * n_train_batches, device=device)
+        train_accs   = torch.zeros(epochs * n_train_batches, device=device)
+        val_losses   = torch.zeros(epochs, device=device)
+        val_accs     = torch.zeros(epochs, device=device)
+        batch_losses = torch.zeros(n_valid_batches, device=device)
+        batch_accs   = torch.zeros(n_valid_batches, device=device)
+
+        if len(old_train_losses) != len(train_losses):
+            click.echo(
+                f'Warning: cached train losses had {len(old_train_losses)} entries, this '
+                f'run expects {len(train_losses)} (epochs={epochs} x '
+                f'batches/epoch={n_train_batches}) - copying over what still fits and '
+                f'zero-filling the rest.', err=True
+            )
+
+        n_copy_train = min(len(old_train_losses), len(train_losses))
+        train_losses[:n_copy_train] = old_train_losses[:n_copy_train]
+        train_accs[:n_copy_train] = old_train_accs[:n_copy_train]
+ 
+        n_copy_val = min(len(old_val_losses), len(val_losses))
+        val_losses[:n_copy_val] = old_val_losses[:n_copy_val]
+        val_accs[:n_copy_val] = old_val_accs[:n_copy_val]
+        # batch_losses/batch_accs are scratch space overwritten every validation pass, not
+        # history - no need to restore their cached contents, just size them to the
+        # current valid_dl length (done above).
         
         click.echo(f'Info: loaded losses (to {device}) from {this_cache_path}/weights_{model_name}.npz')
     else:
         train_stats = bunch.count_classes(classes)
         weights = get_class_weights(train_stats)
+        if weights is None or len(weights) != classes or not np.all(np.isfinite(weights)):
+            raise ValueError(
+                f"get_class_weights(train_stats) returned {weights!r} for --classes "
+                f"{classes} - refusing to cache/train on this. Check train_stats: "
+                f"{train_stats}"
+            )
         np.savez(f'{this_cache_path}/weights_{model_name}.npz', np.asarray(weights, dtype=np.float32))
         click.echo(f'Info: saved weights cache in {this_cache_path}/weights_{model_name}.npz')
 
